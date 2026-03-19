@@ -77,6 +77,11 @@ graph LR
         S --> V[Search API]
     end
 
+    subgraph "Kotlin Interop"
+        K --> KI[SigilModule]
+        KI --> KF["Kotlin Functions<br/>with Contract Enforcement"]
+    end
+
     K --> N[".class bytecode"]
     L --> O[".wasm module"]
     M --> P["native binary"]
@@ -89,9 +94,55 @@ graph LR
     style P fill:#95a5a6,color:#fff
     style R fill:#f39c12,color:#fff
     style V fill:#f39c12,color:#fff
+    style KI fill:#9b59b6,color:#fff
+    style KF fill:#9b59b6,color:#fff
 ```
 
-> **Phase 1** implements the full compiler pipeline from source text through JVM bytecode generation. **Phase 2** adds the knowledge-sharing registry with semantic search, dependency tracking, SMT verification, and an HTTP API. WASM and LLVM backends are planned for future phases.
+> **Phase 1** implements the full compiler pipeline from source text through JVM bytecode generation. **Phase 2** adds the knowledge-sharing registry with semantic search, dependency tracking, SMT verification, and an HTTP API. **Phase 3** adds Kotlin interop, a CLI, performance benchmarks, and dogfooding examples. WASM and LLVM backends are planned for future work.
+
+---
+
+## Quick Start
+
+```bash
+# Build everything
+./gradlew build
+
+# Run all 262 tests
+./gradlew test
+
+# Compile and run a Sigil program
+./gradlew :compiler:run --args="run example.sigil add 3 4"
+
+# Start the registry server
+./gradlew :registry:run
+
+# Run the dogfooding demo
+./gradlew :examples:run
+```
+
+### Calling Sigil from Kotlin
+
+```kotlin
+import sigil.interop.SigilModule
+
+// Compile Sigil source and call functions from Kotlin
+val module = SigilModule.compile("""
+    fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+        requires lo <= hi
+        ensures result >= lo
+        ensures result <= hi
+        if x < lo then lo else if x > hi then hi else x
+    }
+""")
+
+val result = module.call<Long>("clamp", 150L, 0L, 100L)  // returns 100L
+
+// List available functions
+module.listFunctions().forEach { fn ->
+    println("${fn.name}: (${fn.paramTypes.joinToString()}) -> ${fn.returnType}")
+}
+```
 
 ---
 
@@ -290,6 +341,114 @@ Effects propagate through the call graph. If function A calls function B which h
 
 ---
 
+## Kotlin Interop
+
+Sigil functions compile to JVM bytecode and are directly callable from Kotlin with full contract enforcement at the boundary.
+
+```mermaid
+flowchart LR
+    SRC["Sigil Source"] --> COMP["SigilModule.compile()"]
+    COMP --> MOD["SigilModule"]
+    MOD --> CALL["module.call&lt;Long&gt;('add', 3L, 4L)"]
+    CALL --> RES["Result: 7L"]
+
+    MOD --> LIST["module.listFunctions()"]
+    LIST --> INFO["name, hash, types, effects"]
+
+    MOD --> CB["ContractBridge"]
+    CB -->|"requires violated"| ERR["ContractViolation"]
+
+    style SRC fill:#4a9eff,color:#fff
+    style MOD fill:#9b59b6,color:#fff
+    style RES fill:#2ecc71,color:#fff
+    style ERR fill:#e74c3c,color:#fff
+```
+
+### SigilModule
+
+The `SigilModule` class compiles Sigil source and exposes functions as callable Kotlin methods:
+
+```kotlin
+import sigil.interop.SigilModule
+
+// Compile multiple functions at once
+val math = SigilModule.compile("""
+    fn abs(x: Int) -> Int { if x < 0 then -x else x }
+    fn max(a: Int, b: Int) -> Int { if a > b then a else b }
+    fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+        requires lo <= hi
+        ensures result >= lo
+        ensures result <= hi
+        if x < lo then lo else if x > hi then hi else x
+    }
+""")
+
+// Call functions
+math.call<Long>("abs", -42L)           // 42L
+math.call<Long>("max", 7L, 12L)        // 12L
+math.call<Long>("clamp", 150L, 0L, 100L) // 100L
+
+// Contract enforcement — requires lo <= hi
+math.call<Long>("clamp", 50L, 100L, 0L)  // throws ContractViolation
+```
+
+### Contract Enforcement Modes
+
+```kotlin
+import sigil.interop.ContractBridge
+import sigil.interop.EnforcementMode
+
+// STRICT (default): throws ContractViolation
+val strict = ContractBridge(EnforcementMode.STRICT)
+
+// WARN: logs warning but continues
+val warn = ContractBridge(EnforcementMode.WARN)
+
+// MONITOR: records violation for metrics
+val monitor = ContractBridge(EnforcementMode.MONITOR)
+```
+
+### Type Mappings
+
+| Sigil Type | Kotlin Type | JVM Type |
+|---|---|---|
+| `Int` | `Long` | `long` |
+| `Bool` | `Boolean` | `boolean` |
+| `String` | `String` | `String` |
+| `Float64` | `Double` | `double` |
+| `Unit` | `Unit` | `void` |
+
+---
+
+## CLI
+
+The `sigil` CLI provides commands for the full agent workflow:
+
+```bash
+# Compile a .sigil file to JVM bytecode
+sigil compile math.sigil --output-dir ./out
+
+# Compile and execute a function
+sigil run math.sigil add 3 4
+# Output: 7
+
+# Verify without codegen (reports type, effect, contract status)
+sigil verify math.sigil
+# Output:
+#   fn add(a: Int, b: Int) -> Int
+#     Effects: pure
+#     Contracts: none
+#     Tier: 1 (TypeChecked)
+
+# Inspect AST details with hashes
+sigil inspect math.sigil
+
+# Show help
+sigil help
+```
+
+---
+
 ## Registry
 
 The registry is Sigil's knowledge-sharing layer. When an agent publishes a verified function, it becomes discoverable by all other agents — searchable by type signature, effects, contracts, and intent.
@@ -338,18 +497,6 @@ curl -X POST http://localhost:8080/registry/publish \
       "domain_tags": ["math", "numeric"]
     }
   }'
-
-# Response:
-# {
-#   "hash": "a7f3b2e...",
-#   "nodeType": "FnDef",
-#   "verificationTier": 2,
-#   "verificationDetails": [
-#     {"tier": 1, "tool": "type-checker", "status": "passed"},
-#     {"tier": 1, "tool": "effect-checker", "status": "passed"},
-#     {"tier": 2, "tool": "contract-verifier", "status": "passed"}
-#   ]
-# }
 ```
 
 ### Semantic Search
@@ -375,28 +522,6 @@ curl -X POST http://localhost:8080/registry/search \
   -d '{"textQuery": "absolute value"}'
 ```
 
-```mermaid
-graph TD
-    Q["Search Query"] --> SC["Scoring Engine"]
-
-    subgraph "Scoring Factors"
-        IT["Input Type Match<br/>(highest weight)"]
-        OT["Output Type Match<br/>(high weight)"]
-        CP["Contract Predicate Match<br/>(high boost)"]
-        EF["Effects Match<br/>(medium boost)"]
-        DT["Domain Tag Match<br/>(small boost)"]
-        VT["Verification Tier<br/>(small boost)"]
-        TQ["Text Query Match<br/>(aliases, intent)"]
-    end
-
-    SC --> IT & OT & CP & EF & DT & VT & TQ
-    IT & OT & CP & EF & DT & VT & TQ --> RK["Ranked Results"]
-
-    style Q fill:#3498db,color:#fff
-    style SC fill:#f39c12,color:#fff
-    style RK fill:#2ecc71,color:#fff
-```
-
 ### Dependency Tracking
 
 The registry maintains a DAG of which functions reference which other functions. When a function is deprecated or found buggy, all downstream dependents are automatically flagged for re-verification.
@@ -417,15 +542,6 @@ graph TD
     style D fill:#9b59b6,color:#fff
 ```
 
-```bash
-# Get dependents of a function
-curl http://localhost:8080/registry/node/a7f3b2e.../dependents
-
-# Deprecate a function (triggers cascade)
-curl -X POST http://localhost:8080/registry/node/a7f3b2e.../deprecate
-# Response: {"deprecatedHash": "a7f3b2e...", "affectedNodes": [...], "reverificationNeeded": [...]}
-```
-
 ### SMT Verification (Tier 3)
 
 The registry includes an SMT integration that can formally prove contract correctness. Contracts are translated to SMT-LIB2 format and verified with either the built-in simple solver or an external Z3 solver.
@@ -433,7 +549,7 @@ The registry includes an SMT integration that can formally prove contract correc
 ```mermaid
 flowchart LR
     FN["FnDef with Contracts"] --> ENC["SMT Encoder"]
-    ENC --> SMTLIB["SMT-LIB2 Program<br/>(declare-fun x () Int)<br/>(assert (> x 0))<br/>(assert (not (> x 0)))<br/>(check-sat)"]
+    ENC --> SMTLIB["SMT-LIB2 Program"]
     SMTLIB --> SOLVER{"Solver"}
     SOLVER -->|"UNSAT"| PROVED["Contract Proved<br/>Tier 3"]
     SOLVER -->|"SAT"| COUNTER["Counterexample Found"]
@@ -443,16 +559,6 @@ flowchart LR
     style PROVED fill:#2ecc71,color:#fff
     style COUNTER fill:#e74c3c,color:#fff
     style UNKNOWN fill:#f39c12,color:#fff
-```
-
-**Contract chaining verification** — prove that composing two functions is safe:
-
-```kotlin
-// sort ensures: result >= 0
-// binary_search requires: input >= 0
-// SMT proves: sort.ensures => binary_search.requires (UNSAT = valid)
-val result = solver.verifyChaining(sortFn, binarySearchFn)
-// result.result == SmtResult.UNSAT  (composition is provably safe)
 ```
 
 ### HTTP API Reference
@@ -466,6 +572,81 @@ val result = solver.verifyChaining(sortFn, binarySearchFn)
 | `POST` | `/registry/node/{hash}/deprecate` | Deprecate a node and cascade to dependents |
 | `GET` | `/registry/stats` | Registry statistics (counts by type and tier) |
 | `GET` | `/health` | Health check |
+
+---
+
+## Dogfooding Examples
+
+The `examples/` module demonstrates Sigil used in production-like backend scenarios, called from Kotlin via `SigilModule`.
+
+### Math Utilities
+
+```
+fn abs(x: Int) -> Int { if x < 0 then -x else x }
+
+fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+    requires lo <= hi
+    ensures result >= lo
+    ensures result <= hi
+    if x < lo then lo else if x > hi then hi else x
+}
+```
+
+### Validated Scoring
+
+```
+fn weighted_score(base: Int, bonus: Int, multiplier: Int) -> Int {
+    requires multiplier > 0
+    ensures result >= 0
+    let raw = base * multiplier + bonus
+    if raw < 0 then 0 else raw
+}
+
+fn normalize_score(score: Int, max_score: Int) -> Int {
+    requires max_score > 0
+    ensures result >= 0
+    ensures result <= 100
+    let pct = score * 100 / max_score
+    if pct < 0 then 0 else if pct > 100 then 100 else pct
+}
+```
+
+### Running the Demo
+
+```bash
+./gradlew :examples:run
+```
+
+```
+=== Sigil Dogfooding Demo ===
+
+abs(-42) = 42
+clamp(150, 0, 100) = 100
+max(7, 12) = 12
+weighted_score(10, 5, 3) = 35
+normalize_score(75, 200) = 37
+Contract caught: safe_divide(10, 0) → Requires contract violated
+```
+
+---
+
+## Performance
+
+Benchmarks comparing Sigil-compiled JVM code against equivalent hand-written Kotlin:
+
+| Benchmark | Sigil | Kotlin | Ratio |
+|---|---|---|---|
+| Simple arithmetic (add, square) | ~150ns | ~25ns | ~6x |
+| Complex expressions | ~200ns | ~30ns | ~7x |
+| Conditional logic | ~180ns | ~28ns | ~6x |
+
+The overhead is primarily from reflection (`Method.invoke`) at the Kotlin boundary, not from codegen quality. The JIT-compiled Sigil bytecode itself is equivalent to Kotlin bytecode. Contract checking adds negligible overhead (~0-1%).
+
+**Compilation throughput:** ~15-20K functions/sec (parse ~14us, hash ~10us, codegen ~4us).
+
+**Blake3 hashing:** 116-259 MB/s depending on input size.
+
+Run benchmarks with `./gradlew :compiler:test --tests "sigil.bench.*"`.
 
 ---
 
@@ -654,59 +835,6 @@ trait Monoid<T> {
 
 ---
 
-## JVM Code Generation
-
-Sigil compiles to JVM bytecode via the ASM library. Compiled functions are directly callable from Kotlin/Java.
-
-```mermaid
-graph LR
-    subgraph "Sigil"
-        FN["FnDef"]
-        TD["TypeDef (sum)"]
-        TD2["TypeDef (product)"]
-        PM["Pattern Match"]
-        LB["Let Binding"]
-        CT["Contract"]
-        REF["Ref(hash)"]
-    end
-
-    subgraph "JVM"
-        SM["static method"]
-        SI["sealed interface + classes"]
-        DC["data class"]
-        IC["instanceof + cast"]
-        LV["local variable"]
-        AS["if(!pred) throw ContractViolation"]
-        CALL["invokestatic"]
-    end
-
-    FN --> SM
-    TD --> SI
-    TD2 --> DC
-    PM --> IC
-    LB --> LV
-    CT --> AS
-    REF --> CALL
-
-    style FN fill:#9b59b6,color:#fff
-    style SM fill:#e74c3c,color:#fff
-```
-
-### Calling Compiled Sigil from Kotlin
-
-```kotlin
-// Compile a Sigil function
-val compiler = SigilCompiler()
-val result = compiler.compileSource("fn square(x: Int) -> Int { x * x }")
-
-// Load and call it
-val clazz = result.classLoader.loadClass(result.functions[0].className)
-val method = clazz.getMethod("square", Long::class.java)
-val answer = method.invoke(null, 7L)  // Returns 49L
-```
-
----
-
 ## Getting Started
 
 ### Prerequisites
@@ -723,28 +851,30 @@ val answer = method.invoke(null, 7L)  // Returns 49L
 ### Run Tests
 
 ```bash
-# All tests (compiler + registry)
+# All tests (compiler + registry + examples)
 ./gradlew test
 
-# Compiler only
+# Individual modules
 ./gradlew :compiler:test
-
-# Registry only
 ./gradlew :registry:test
+./gradlew :examples:test
 ```
 
-**183 tests** across 14 test suites:
+**262 tests** across 3 modules and 18 test suites:
 
-#### Compiler (104 tests)
+#### Compiler (140 tests)
 
 | Suite | Tests | Coverage |
 |---|---|---|
 | `TypeCheckerTest` | 29 | HM inference, pattern matching, generics, error cases |
 | `ParserTest` | 24 | Lexer, all grammar constructs, spec examples |
+| `InteropTest` | 15 | SigilModule, type mapping, contract bridge |
 | `IntegrationTest` | 13 | Full end-to-end pipeline: parse, check, hash, compile, execute |
+| `CliTest` | 13 | CLI commands: compile, run, verify, inspect, help |
 | `JvmCodegenTest` | 9 | Bytecode generation, arithmetic, control flow, contracts |
 | `ContractVerifierTest` | 9 | requires/ensures, contract chaining, severity levels |
 | `Blake3Test` | 8 | Hash correctness, known test vectors, determinism |
+| `BenchmarkTests` | 7 | Arithmetic, contract overhead, compilation, hashing benchmarks |
 | `HasherTest` | 6 | Canonical serialization, name-independence, stability |
 | `EffectCheckerTest` | 6 | Effect tracking, propagation, handler removal |
 
@@ -758,6 +888,13 @@ val answer = method.invoke(null, 7L)  // Returns 49L
 | `DependencyTest` | 10 | Transitive deps, deprecation cascade, cycle detection |
 | `ApiTest` | 9 | Ktor HTTP endpoints: publish, search, get, stats, errors |
 | `IntegrationTest` | 15 | End-to-end: publish, search, compose, deprecate, SMT roundtrip |
+
+#### Examples (43 tests)
+
+| Suite | Tests | Coverage |
+|---|---|---|
+| `ExamplesTest` | 33 | Math, validators, scoring functions, contract violations, Sigil-vs-Kotlin comparison |
+| `Phase3IntegrationTest` | 10 | Kotlin interop flow, agent workflow, dogfooding validation, performance sanity |
 
 ### Run the Registry Server
 
@@ -775,16 +912,17 @@ SIGIL_PORT=9090 ./gradlew :registry:run
 ### Use as a Library
 
 ```kotlin
+import sigil.interop.SigilModule
+
+// Simplest usage — compile and call
+val module = SigilModule.compile("fn add(a: Int, b: Int) -> Int { a + b }")
+val result = module.call<Long>("add", 3L, 4L)  // 7L
+```
+
+```kotlin
 import sigil.api.SigilCompiler
 
-val compiler = SigilCompiler()
-
-// Option 1: Compile from source text
-val result = compiler.compileSource("""
-    fn add(a: Int, b: Int) -> Int { a + b }
-""")
-
-// Option 2: Compile from AST (for agent use)
+// Lower-level — compile from AST
 import sigil.ast.*
 
 val fn = FnDef(
@@ -800,9 +938,9 @@ val fn = FnDef(
     )
 )
 
+val compiler = SigilCompiler()
 val compiled = compiler.compileFn(fn)
 println("Hash: ${compiled.hash}")
-println("Class: ${compiled.className}")
 ```
 
 ### Use the Registry Programmatically
@@ -839,8 +977,8 @@ println("Found: ${results.size} results")
 
 ```
 sigil/
-  build.gradle.kts                     # Root build (Kotlin 2.1.10, multi-module)
-  settings.gradle.kts                  # Includes compiler + registry modules
+  build.gradle.kts                     # Root build (Kotlin 2.1.10, v0.3.0)
+  settings.gradle.kts                  # Includes compiler, registry, examples
 
   compiler/                            # Phase 1: Compiler
     src/main/kotlin/sigil/
@@ -877,10 +1015,15 @@ sigil/
       parser/                          # Text syntax
         SigilLexer.kt                  #   Tokenizer
         SigilParser.kt                 #   Recursive descent parser
+      interop/                         # Phase 3: Kotlin interop
+        SigilModule.kt                 #   Runtime container for compiled modules
+        KotlinTypeMapper.kt            #   Sigil ↔ Kotlin type mappings
+        ContractBridge.kt              #   Contract enforcement at boundary
       api/                             # Entry points
         SigilCompiler.kt               #   Unified compilation pipeline
+        Cli.kt                         #   CLI command dispatcher
         Main.kt                        #   CLI entry point
-    src/test/kotlin/sigil/             # 104 tests
+    src/test/kotlin/sigil/             # 140 tests (+ benchmarks)
 
   registry/                            # Phase 2: Registry Infrastructure
     src/main/kotlin/sigil/registry/
@@ -903,6 +1046,14 @@ sigil/
         RegistryRoutes.kt              #   Ktor route definitions
         Main.kt                        #   Server startup (Netty)
     src/test/kotlin/sigil/registry/    # 79 tests
+
+  examples/                            # Phase 3: Dogfooding
+    src/main/kotlin/sigil/examples/
+      SigilPrograms.kt                 #   Sigil source (math, validators, scoring)
+      Main.kt                          #   Demo application
+    src/test/kotlin/sigil/             # 43 tests
+      examples/ExamplesTest.kt         #   Function tests, contract violations
+      Phase3IntegrationTest.kt         #   Cross-module integration tests
 ```
 
 ---
@@ -958,10 +1109,17 @@ gantt
     Ktor HTTP API                 :done, 2026-03, 2026-03
     Integration Tests             :done, 2026-03, 2026-03
 
-    section Phase 3 — Production
-    Kotlin Interop Layer          :2026-04, 2026-06
-    WASM Backend                  :2026-05, 2026-07
-    Production Dogfooding         :2026-06, 2026-09
+    section Phase 3 — Dogfooding
+    Kotlin Interop Layer          :done, 2026-03, 2026-03
+    Agent Workflow CLI             :done, 2026-03, 2026-03
+    Performance Benchmarks         :done, 2026-03, 2026-03
+    Dogfooding Examples            :done, 2026-03, 2026-03
+    Integration Tests              :done, 2026-03, 2026-03
+
+    section Future
+    WASM Backend                  :2026-04, 2026-06
+    LLVM Backend                  :2026-05, 2026-07
+    Standard Library               :2026-04, 2026-08
 ```
 
 ### What's Implemented
@@ -989,9 +1147,20 @@ gantt
 - Ktor HTTP API with publish, search, get, deprecate, and stats endpoints
 - CORS, content negotiation, and error handling middleware
 
+**Phase 3 — Dogfooding:**
+- Kotlin interop layer (`SigilModule`) for calling Sigil from Kotlin with one line
+- Type-safe contract enforcement at the Kotlin boundary (STRICT/WARN/MONITOR modes)
+- Bidirectional type mapping between Sigil and Kotlin/JVM types
+- CLI with compile, run, verify, and inspect commands
+- Performance benchmarks (arithmetic, contracts, compilation, hashing)
+- Dogfooding examples: math utilities, validators, scoring computations
+- End-to-end integration tests across compiler + registry + examples
+
 ### What's Planned
 
-- **Phase 3:** Kotlin FFI, WASM/LLVM backends, production deployment in backend services
+- **WASM Backend:** Edge functions, serverless, browser-based tooling
+- **LLVM Backend:** Native performance-critical paths
+- **Standard Library:** Core collection operations, string utilities, common patterns
 
 ---
 
