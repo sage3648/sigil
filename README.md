@@ -38,6 +38,7 @@ Sigil fixes this by making the language itself a knowledge-sharing system.
 | Hidden side effects cause composition bugs | Algebraic effect system — every side effect is declared and tracked |
 | Code rots as runtimes change | Target-agnostic AST is the canonical form; JVM/WASM/LLVM are pluggable backends |
 | Naming conflicts across agents | Names are aliases — identity is structural, not nominal |
+| No way to find reusable components | Registry with semantic search by type signature, effects, and contracts |
 
 ---
 
@@ -68,6 +69,14 @@ graph LR
         J --> M[LLVM Codegen]
     end
 
+    subgraph "Registry"
+        J --> R[Registry Store]
+        R --> S[Semantic Index]
+        R --> T[Dependency DAG]
+        R --> U[SMT Verifier]
+        S --> V[Search API]
+    end
+
     K --> N[".class bytecode"]
     L --> O[".wasm module"]
     M --> P["native binary"]
@@ -78,9 +87,11 @@ graph LR
     style N fill:#e74c3c,color:#fff
     style O fill:#95a5a6,color:#fff
     style P fill:#95a5a6,color:#fff
+    style R fill:#f39c12,color:#fff
+    style V fill:#f39c12,color:#fff
 ```
 
-> **Phase 1 (this repo)** implements the full pipeline from source text through JVM bytecode generation. WASM and LLVM backends are planned for future phases.
+> **Phase 1** implements the full compiler pipeline from source text through JVM bytecode generation. **Phase 2** adds the knowledge-sharing registry with semantic search, dependency tracking, SMT verification, and an HTTP API. WASM and LLVM backends are planned for future phases.
 
 ---
 
@@ -276,6 +287,185 @@ graph TD
 ```
 
 Effects propagate through the call graph. If function A calls function B which has `Http`, then A also has `Http` unless it handles it with an effect handler.
+
+---
+
+## Registry
+
+The registry is Sigil's knowledge-sharing layer. When an agent publishes a verified function, it becomes discoverable by all other agents — searchable by type signature, effects, contracts, and intent.
+
+```mermaid
+flowchart LR
+    subgraph "Agent Publishes"
+        SRC[Source Code] --> PIPE[Compiler Pipeline]
+        PIPE --> VER{Verified?}
+        VER -->|Yes| STORE[Registry Store]
+        VER -->|No| ERR[Rejection + Errors]
+    end
+
+    subgraph "Registry Processing"
+        STORE --> SEM[Semantic Extractor]
+        STORE --> DEP[Dependency Tracker]
+        STORE --> SMT[SMT Verifier]
+        SEM --> IDX[Semantic Index]
+    end
+
+    subgraph "Agent Discovers"
+        Q[Search Query] --> IDX
+        IDX --> RES[Ranked Results]
+        RES --> USE[Reference by Hash]
+    end
+
+    style STORE fill:#f39c12,color:#fff
+    style IDX fill:#3498db,color:#fff
+    style SMT fill:#2ecc71,color:#fff
+    style ERR fill:#e74c3c,color:#fff
+```
+
+### Publishing
+
+Submit source code to the registry. The full compiler pipeline runs automatically — type checking, effect checking, contract verification, hashing, semantic signature extraction, and dependency tracking.
+
+```bash
+# Publish via HTTP API
+curl -X POST http://localhost:8080/registry/publish \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": "fn abs(x: Int) -> Int { ensures result >= 0; if x < 0 then -x else x }",
+    "metadata": {
+      "aliases": ["absolute_value"],
+      "intent": "returns the absolute value of an integer",
+      "domain_tags": ["math", "numeric"]
+    }
+  }'
+
+# Response:
+# {
+#   "hash": "a7f3b2e...",
+#   "nodeType": "FnDef",
+#   "verificationTier": 2,
+#   "verificationDetails": [
+#     {"tier": 1, "tool": "type-checker", "status": "passed"},
+#     {"tier": 1, "tool": "effect-checker", "status": "passed"},
+#     {"tier": 2, "tool": "contract-verifier", "status": "passed"}
+#   ]
+# }
+```
+
+### Semantic Search
+
+Search the registry by type signature, effects, contracts, domain tags, or free text. Results are ranked by relevance.
+
+```bash
+# Find all pure functions that take two Ints and return an Int
+curl -X POST http://localhost:8080/registry/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "inputTypes": ["#sigil:int", "#sigil:int"],
+    "outputType": "#sigil:int",
+    "effects": "pure"
+  }'
+
+# Search by contract guarantees
+curl -X POST http://localhost:8080/registry/search \
+  -d '{"ensuresContains": ["is_sorted"], "domainTags": ["sorting"]}'
+
+# Search by intent (fuzzy text match on aliases and descriptions)
+curl -X POST http://localhost:8080/registry/search \
+  -d '{"textQuery": "absolute value"}'
+```
+
+```mermaid
+graph TD
+    Q["Search Query"] --> SC["Scoring Engine"]
+
+    subgraph "Scoring Factors"
+        IT["Input Type Match<br/>(highest weight)"]
+        OT["Output Type Match<br/>(high weight)"]
+        CP["Contract Predicate Match<br/>(high boost)"]
+        EF["Effects Match<br/>(medium boost)"]
+        DT["Domain Tag Match<br/>(small boost)"]
+        VT["Verification Tier<br/>(small boost)"]
+        TQ["Text Query Match<br/>(aliases, intent)"]
+    end
+
+    SC --> IT & OT & CP & EF & DT & VT & TQ
+    IT & OT & CP & EF & DT & VT & TQ --> RK["Ranked Results"]
+
+    style Q fill:#3498db,color:#fff
+    style SC fill:#f39c12,color:#fff
+    style RK fill:#2ecc71,color:#fff
+```
+
+### Dependency Tracking
+
+The registry maintains a DAG of which functions reference which other functions. When a function is deprecated or found buggy, all downstream dependents are automatically flagged for re-verification.
+
+```mermaid
+graph TD
+    A["sort<br/>#a7f3b2e"] --> B["search_sorted<br/>#c4d5e6f"]
+    A --> C["deduplicate<br/>#b8c9d0e"]
+    B --> D["find_nearest<br/>#e1f2a3b"]
+    C --> D
+
+    A -.->|"deprecated!"| CASCADE["Cascade: re-verify<br/>B, C, D"]
+
+    style A fill:#e74c3c,color:#fff
+    style CASCADE fill:#f39c12,color:#fff
+    style B fill:#3498db,color:#fff
+    style C fill:#3498db,color:#fff
+    style D fill:#9b59b6,color:#fff
+```
+
+```bash
+# Get dependents of a function
+curl http://localhost:8080/registry/node/a7f3b2e.../dependents
+
+# Deprecate a function (triggers cascade)
+curl -X POST http://localhost:8080/registry/node/a7f3b2e.../deprecate
+# Response: {"deprecatedHash": "a7f3b2e...", "affectedNodes": [...], "reverificationNeeded": [...]}
+```
+
+### SMT Verification (Tier 3)
+
+The registry includes an SMT integration that can formally prove contract correctness. Contracts are translated to SMT-LIB2 format and verified with either the built-in simple solver or an external Z3 solver.
+
+```mermaid
+flowchart LR
+    FN["FnDef with Contracts"] --> ENC["SMT Encoder"]
+    ENC --> SMTLIB["SMT-LIB2 Program<br/>(declare-fun x () Int)<br/>(assert (> x 0))<br/>(assert (not (> x 0)))<br/>(check-sat)"]
+    SMTLIB --> SOLVER{"Solver"}
+    SOLVER -->|"UNSAT"| PROVED["Contract Proved<br/>Tier 3"]
+    SOLVER -->|"SAT"| COUNTER["Counterexample Found"]
+    SOLVER -->|"UNKNOWN"| UNKNOWN["Too Complex<br/>Stay at Tier 2"]
+
+    style FN fill:#9b59b6,color:#fff
+    style PROVED fill:#2ecc71,color:#fff
+    style COUNTER fill:#e74c3c,color:#fff
+    style UNKNOWN fill:#f39c12,color:#fff
+```
+
+**Contract chaining verification** — prove that composing two functions is safe:
+
+```kotlin
+// sort ensures: result >= 0
+// binary_search requires: input >= 0
+// SMT proves: sort.ensures => binary_search.requires (UNSAT = valid)
+val result = solver.verifyChaining(sortFn, binarySearchFn)
+// result.result == SmtResult.UNSAT  (composition is provably safe)
+```
+
+### HTTP API Reference
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/registry/publish` | Submit source code for verification and storage |
+| `POST` | `/registry/search` | Search by type signature, effects, contracts, tags |
+| `GET` | `/registry/node/{hash}` | Retrieve a node by its content hash |
+| `GET` | `/registry/node/{hash}/dependents` | List all dependents of a node |
+| `POST` | `/registry/node/{hash}/deprecate` | Deprecate a node and cascade to dependents |
+| `GET` | `/registry/stats` | Registry statistics (counts by type and tier) |
+| `GET` | `/health` | Health check |
 
 ---
 
@@ -527,28 +717,60 @@ val answer = method.invoke(null, 7L)  // Returns 49L
 ### Build
 
 ```bash
-cd compiler
 ./gradlew build
 ```
 
 ### Run Tests
 
 ```bash
+# All tests (compiler + registry)
 ./gradlew test
+
+# Compiler only
+./gradlew :compiler:test
+
+# Registry only
+./gradlew :registry:test
 ```
 
-**104 tests** across 8 test suites:
+**183 tests** across 14 test suites:
+
+#### Compiler (104 tests)
 
 | Suite | Tests | Coverage |
 |---|---|---|
 | `TypeCheckerTest` | 29 | HM inference, pattern matching, generics, error cases |
 | `ParserTest` | 24 | Lexer, all grammar constructs, spec examples |
-| `IntegrationTest` | 13 | Full end-to-end pipeline: parse → check → hash → compile → execute |
+| `IntegrationTest` | 13 | Full end-to-end pipeline: parse, check, hash, compile, execute |
 | `JvmCodegenTest` | 9 | Bytecode generation, arithmetic, control flow, contracts |
 | `ContractVerifierTest` | 9 | requires/ensures, contract chaining, severity levels |
 | `Blake3Test` | 8 | Hash correctness, known test vectors, determinism |
 | `HasherTest` | 6 | Canonical serialization, name-independence, stability |
 | `EffectCheckerTest` | 6 | Effect tracking, propagation, handler removal |
+
+#### Registry (79 tests)
+
+| Suite | Tests | Coverage |
+|---|---|---|
+| `RegistryStoreTest` | 16 | InMemoryStore CRUD, verification updates, dependency tracking |
+| `SmtTest` | 16 | SMT-LIB2 encoding, contract verification, chaining, edge cases |
+| `SemanticTest` | 13 | Signature extraction, type/effect/contract search, ranking |
+| `DependencyTest` | 10 | Transitive deps, deprecation cascade, cycle detection |
+| `ApiTest` | 9 | Ktor HTTP endpoints: publish, search, get, stats, errors |
+| `IntegrationTest` | 15 | End-to-end: publish, search, compose, deprecate, SMT roundtrip |
+
+### Run the Registry Server
+
+```bash
+# Start with in-memory store (default)
+./gradlew :registry:run
+
+# Start with MongoDB
+MONGO_URI=mongodb://localhost:27017 ./gradlew :registry:run
+
+# Custom port
+SIGIL_PORT=9090 ./gradlew :registry:run
+```
 
 ### Use as a Library
 
@@ -583,51 +805,104 @@ println("Hash: ${compiled.hash}")
 println("Class: ${compiled.className}")
 ```
 
+### Use the Registry Programmatically
+
+```kotlin
+import sigil.registry.api.*
+import sigil.registry.store.InMemoryStore
+
+val store = InMemoryStore()
+val service = RegistryService(store)
+
+// Publish a function
+val responses = service.publish(PublishRequest(
+    source = "fn double(x: Int) -> Int { x * 2 }",
+    metadata = PublishMetadata(
+        aliases = listOf("times_two"),
+        intent = "doubles an integer",
+        domainTags = listOf("math")
+    )
+))
+println("Published: ${responses[0].hash}")
+
+// Search for it
+val results = service.search(SearchRequest(
+    outputType = "#sigil:int",
+    domainTags = listOf("math")
+))
+println("Found: ${results.size} results")
+```
+
 ---
 
 ## Project Structure
 
 ```
 sigil/
-  compiler/                          # Kotlin/Gradle project
+  build.gradle.kts                     # Root build (Kotlin 2.1.10, multi-module)
+  settings.gradle.kts                  # Includes compiler + registry modules
+
+  compiler/                            # Phase 1: Compiler
     src/main/kotlin/sigil/
-      ast/                           # AST node data classes (12 files)
-        ExprNode.kt                  #   Expression nodes (sealed class, 8 variants)
-        FnDef.kt                     #   Function definition
-        TypeDef.kt                   #   Algebraic data types
-        ContractNode.kt              #   requires/ensures contracts
-        EffectDef.kt                 #   Effect declarations
-        TraitDef.kt                  #   Trait definitions
-        ModuleDef.kt                 #   Module definitions
-        TypeRef.kt                   #   Type references & type variables
-        RefinementType.kt            #   Refinement types
-        EffectHandler.kt             #   Effect handler implementations
-        Types.kt                     #   Primitive type constants
-        Metadata.kt                  #   SemanticMeta, VerificationRecord
-      hash/                          # Content-addressing
-        Blake3.kt                    #   Pure Kotlin Blake3 implementation
-        Hasher.kt                    #   Canonical AST serialization
-      types/                         # Type system
-        TypeChecker.kt               #   Hindley-Milner type inference
-        Unifier.kt                   #   Constraint unification (Algorithm W)
-        TraitResolver.kt             #   Trait bound checking
-      contracts/                     # Contract system
-        ContractVerifier.kt          #   Contract validation + chaining
-        PropertyTester.kt            #   Property-based testing (QuickCheck-style)
-      effects/                       # Effect system
-        EffectChecker.kt             #   Effect tracking + propagation
-      codegen/jvm/                   # JVM backend
-        JvmCodegen.kt               #   ASM bytecode generation
-        JvmLinker.kt                 #   ClassLoader for compiled code
-        LocalVarTable.kt             #   Local variable index tracking
-        ContractViolation.kt         #   Runtime exception for contract failures
-      parser/                        # Text syntax
-        SigilLexer.kt               #   Tokenizer
-        SigilParser.kt              #   Recursive descent parser
-      api/                           # Entry points
-        SigilCompiler.kt            #   Unified compilation pipeline
-        Main.kt                     #   CLI entry point
-    src/test/kotlin/sigil/           # Test suites (104 tests)
+      ast/                             # AST node data classes (12 files)
+        ExprNode.kt                    #   Expression nodes (sealed class, 8 variants)
+        FnDef.kt                       #   Function definition
+        TypeDef.kt                     #   Algebraic data types
+        ContractNode.kt                #   requires/ensures contracts
+        EffectDef.kt                   #   Effect declarations
+        TraitDef.kt                    #   Trait definitions
+        ModuleDef.kt                   #   Module definitions
+        TypeRef.kt                     #   Type references & type variables
+        RefinementType.kt              #   Refinement types
+        EffectHandler.kt               #   Effect handler implementations
+        Types.kt                       #   Primitive type constants
+        Metadata.kt                    #   SemanticMeta, VerificationRecord
+      hash/                            # Content-addressing
+        Blake3.kt                      #   Pure Kotlin Blake3 implementation
+        Hasher.kt                      #   Canonical AST serialization
+      types/                           # Type system
+        TypeChecker.kt                 #   Hindley-Milner type inference
+        Unifier.kt                     #   Constraint unification (Algorithm W)
+        TraitResolver.kt               #   Trait bound checking
+      contracts/                       # Contract system
+        ContractVerifier.kt            #   Contract validation + chaining
+        PropertyTester.kt              #   Property-based testing (QuickCheck-style)
+      effects/                         # Effect system
+        EffectChecker.kt               #   Effect tracking + propagation
+      codegen/jvm/                     # JVM backend
+        JvmCodegen.kt                  #   ASM bytecode generation
+        JvmLinker.kt                   #   ClassLoader for compiled code
+        LocalVarTable.kt               #   Local variable index tracking
+        ContractViolation.kt           #   Runtime exception for contract failures
+      parser/                          # Text syntax
+        SigilLexer.kt                  #   Tokenizer
+        SigilParser.kt                 #   Recursive descent parser
+      api/                             # Entry points
+        SigilCompiler.kt               #   Unified compilation pipeline
+        Main.kt                        #   CLI entry point
+    src/test/kotlin/sigil/             # 104 tests
+
+  registry/                            # Phase 2: Registry Infrastructure
+    src/main/kotlin/sigil/registry/
+      store/                           # Content-addressed storage
+        RegistryStore.kt               #   Storage interface
+        InMemoryStore.kt               #   HashMap-based (testing/dev)
+        MongoStore.kt                  #   MongoDB backend (production)
+        RegistryNode.kt                #   RegistryNode, NodeMetadata, SemanticSignature
+      semantic/                        # Semantic indexing & search
+        SemanticExtractor.kt           #   Extract signatures from AST nodes
+        SemanticSearch.kt              #   SearchQuery, SearchResult, scoring engine
+      deps/                            # Dependency tracking
+        DependencyTracker.kt           #   DAG traversal, cascade deprecation
+      smt/                             # SMT verification
+        SmtEncoder.kt                  #   Contract → SMT-LIB2 translation
+        SmtSolver.kt                   #   SimpleSmtSolver, Z3SmtSolver
+      api/                             # HTTP API
+        ApiModels.kt                   #   Request/response data classes
+        RegistryService.kt             #   Business logic (orchestrates all components)
+        RegistryRoutes.kt              #   Ktor route definitions
+        Main.kt                        #   Server startup (Netty)
+    src/test/kotlin/sigil/registry/    # 79 tests
 ```
 
 ---
@@ -639,7 +914,7 @@ Every compiled node receives a verification tier that represents the level of tr
 ```mermaid
 graph BT
     T1["Tier 1: TypeChecked<br/>Compiles, types align"]
-    T2["Tier 2: PropertyTested<br/>10K+ property test runs pass"]
+    T2["Tier 2: PropertyTested<br/>Contracts present and validated"]
     T3["Tier 3: FormallyProved<br/>SMT solver confirms all contracts"]
 
     T1 --> T2 --> T3
@@ -651,9 +926,9 @@ graph BT
 
 | Tier | Name | Requirement | Status |
 |---|---|---|---|
-| 1 | TypeChecked | Compiles, types align | Implemented |
-| 2 | PropertyTested | 10K+ property-based test runs pass | Basic framework |
-| 3 | FormallyProved | SMT solver confirms all contracts | Planned (Phase 2) |
+| 1 | TypeChecked | Compiles, types align, effects verified | Implemented |
+| 2 | PropertyTested | Contracts present and validated | Implemented |
+| 3 | FormallyProved | SMT solver confirms all contracts | Implemented |
 
 ---
 
@@ -676,19 +951,22 @@ gantt
     Integration Tests             :done, 2026-03, 2026-03
 
     section Phase 2 — Registry
-    Content-Addressed Storage     :active, 2026-04, 2026-05
-    Semantic Signature Indexing   :2026-05, 2026-06
-    SMT Integration (Z3)          :2026-05, 2026-07
-    Agent Contribution API        :2026-06, 2026-07
+    Content-Addressed Storage     :done, 2026-03, 2026-03
+    Semantic Signature Indexing   :done, 2026-03, 2026-03
+    Dependency Tracking DAG       :done, 2026-03, 2026-03
+    SMT Integration               :done, 2026-03, 2026-03
+    Ktor HTTP API                 :done, 2026-03, 2026-03
+    Integration Tests             :done, 2026-03, 2026-03
 
     section Phase 3 — Production
-    Kotlin Interop Layer          :2026-07, 2026-09
-    WASM Backend                  :2026-08, 2026-10
-    Production Dogfooding         :2026-09, 2026-12
+    Kotlin Interop Layer          :2026-04, 2026-06
+    WASM Backend                  :2026-05, 2026-07
+    Production Dogfooding         :2026-06, 2026-09
 ```
 
-### What's Implemented (Phase 1)
+### What's Implemented
 
+**Phase 1 — Compiler:**
 - Full AST node type system with `@Serializable` annotations
 - Pure Kotlin Blake3 implementation (256-bit, deterministic)
 - Canonical AST serialization for content-addressing
@@ -699,9 +977,20 @@ gantt
 - Recursive descent parser for the full text syntax
 - Unified `SigilCompiler` pipeline API
 
+**Phase 2 — Registry:**
+- Content-addressed storage with InMemoryStore and MongoStore backends
+- Semantic signature extraction from FnDef, TypeDef, and TraitDef
+- Type-aware search with multi-factor scoring (type match, contracts, effects, tags, text)
+- Dependency DAG with transitive traversal and cascade deprecation
+- SMT-LIB2 encoder for contract-to-solver translation
+- Built-in SimpleSmtSolver for basic arithmetic/boolean proofs
+- Z3SmtSolver integration (shells out to z3 CLI with fallback)
+- Contract chaining verification (proves composition safety)
+- Ktor HTTP API with publish, search, get, deprecate, and stats endpoints
+- CORS, content negotiation, and error handling middleware
+
 ### What's Planned
 
-- **Phase 2:** Knowledge-sharing registry with semantic search, MongoDB storage, SMT-backed formal proofs
 - **Phase 3:** Kotlin FFI, WASM/LLVM backends, production deployment in backend services
 
 ---
@@ -714,6 +1003,7 @@ gantt
 4. **Effects are declared, not hidden.** Every side effect must be in the function signature.
 5. **Target-agnostic persistence.** The verified AST is permanent. Compilation targets are pluggable.
 6. **Agent-first ergonomics.** Designed for what agents need: structural clarity, unambiguous semantics, rich metadata.
+7. **Knowledge compounds.** Every verified function published to the registry makes every future agent more capable.
 
 ---
 
@@ -721,12 +1011,12 @@ gantt
 
 Sigil is designed to be built *by* agents, *for* agents. The agent contribution protocol is:
 
-1. Construct an AST node (as JSON or Kotlin objects)
-2. Submit to the verification pipeline
-3. Type checker, effect checker, and contract verifier run
-4. If all pass: Blake3 hash is computed, node is stored
-5. Property-based testing runs asynchronously (Tier 2 upgrade)
-6. SMT solver runs asynchronously (Tier 3 upgrade)
+1. Construct an AST node (as JSON or Kotlin objects) or write Sigil source text
+2. Submit to the registry via HTTP API or programmatic `RegistryService`
+3. The full compiler pipeline runs: parse, type check, effect check, contract verify
+4. If all pass: Blake3 hash is computed, semantic signature extracted, dependencies tracked
+5. The node is stored and becomes searchable by all agents
+6. SMT solver runs for Tier 3 formal proof upgrade
 
 ---
 
