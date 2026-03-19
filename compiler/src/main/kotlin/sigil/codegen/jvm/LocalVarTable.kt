@@ -11,6 +11,10 @@ class LocalVarTable {
         return index
     }
 
+    fun alias(name: String, slot: Int) {
+        vars[name] = slot
+    }
+
     fun lookup(name: String): Int =
         vars[name] ?: throw CompileError("Undefined variable: $name")
 

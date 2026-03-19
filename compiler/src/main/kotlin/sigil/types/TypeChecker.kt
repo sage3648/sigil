@@ -92,7 +92,7 @@ class TypeChecker {
         }
 
         if (fn.contract != null) {
-            checkContract(fn.contract, localEnv)
+            checkContract(fn.contract, localEnv, declaredReturn)
         }
 
         val fnType = Type.Function(paramTypes, declaredReturn, fn.effects)
@@ -279,7 +279,7 @@ class TypeChecker {
         return lastType
     }
 
-    private fun checkContract(contract: ContractNode, localEnv: Map<String, Type>) {
+    private fun checkContract(contract: ContractNode, localEnv: Map<String, Type>, returnType: Type? = null) {
         for (clause in contract.requires) {
             val predType = inferExpr(clause.predicate, localEnv)
             try {
@@ -288,8 +288,14 @@ class TypeChecker {
                 throw TypeCheckError("Contract requires clause must return Bool: ${e.message}")
             }
         }
+        // 'result' refers to the function's return value in ensures clauses
+        val ensuresEnv = if (returnType != null) {
+            localEnv.toMutableMap().also { it["result"] = returnType }
+        } else {
+            localEnv
+        }
         for (clause in contract.ensures) {
-            val predType = inferExpr(clause.predicate, localEnv)
+            val predType = inferExpr(clause.predicate, ensuresEnv)
             try {
                 unifier.unify(predType, Type.Concrete(PrimitiveTypes.BOOL))
             } catch (e: UnificationError) {

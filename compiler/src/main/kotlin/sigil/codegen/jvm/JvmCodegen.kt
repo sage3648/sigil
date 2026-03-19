@@ -453,22 +453,13 @@ class JvmCodegen {
         retType: TypeRef
     ) {
         // For ensures, the predicate might reference 'result'
-        // We make __result available as "result" in the locals
+        // We alias "result" to the __result slot so compileExpr can resolve it
         val skipLabel = Label()
 
-        // The predicate in ensures should be able to access the result.
-        // We use a special binding: store result as "result" local
         val resultLocals = locals.copy()
-        // result is already stored in __result slot; add an alias
-        try {
-            resultLocals.lookup("result")
-        } catch (_: CompileError) {
-            // Not yet declared, point "result" to the same slot
-            // We need a workaround since LocalVarTable doesn't support aliases
-            // Instead, just load __result when we see a ref to "result"
-        }
+        resultLocals.alias("result", resultSlot)
 
-        compileExpr(clause.predicate, mv, locals)
+        compileExpr(clause.predicate, mv, resultLocals)
         mv.visitJumpInsn(IFNE, skipLabel)
         mv.visitTypeInsn(NEW, "sigil/codegen/jvm/ContractViolation")
         mv.visitInsn(DUP)
