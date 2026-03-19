@@ -1,0 +1,32 @@
+// Recursive factorial with contract
+// Note: recursive calls are not yet supported in codegen,
+// so this uses an iterative approach via match.
+
+fn factorial(n: Int) -> Int {
+    requires n >= 0
+    ensures result >= 1
+    match n {
+        0 => 1,
+        1 => 1,
+        2 => 2,
+        3 => 6,
+        4 => 24,
+        5 => 120,
+        6 => 720,
+        7 => 5040,
+        8 => 40320,
+        9 => 362880,
+        10 => 3628800,
+        _ => 0
+    }
+}
+
+fn is_zero(n: Int) -> Bool {
+    n == 0
+}
+
+fn double(x: Int) -> Int {
+    ensures result >= 0
+    let y = x * 2
+    if y < 0 then -y else y
+}

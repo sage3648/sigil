@@ -241,7 +241,7 @@ object Cli {
     }
 
     private fun printHelp() {
-        println("Sigil Compiler v0.1.0")
+        println("Sigil Compiler v0.4.0")
         println()
         println("Usage: sigil <command> [options]")
         println()

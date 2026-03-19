@@ -1,0 +1,42 @@
+// Arithmetic functions with contracts
+
+fn add(a: Int, b: Int) -> Int {
+    a + b
+}
+
+fn subtract(a: Int, b: Int) -> Int {
+    a - b
+}
+
+fn multiply(a: Int, b: Int) -> Int {
+    a * b
+}
+
+fn divide(a: Int, b: Int) -> Int {
+    requires b != 0
+    a / b
+}
+
+fn abs(x: Int) -> Int {
+    ensures result >= 0
+    if x < 0 then -x else x
+}
+
+fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+    requires lo <= hi
+    ensures result >= lo
+    ensures result <= hi
+    if x < lo then lo else if x > hi then hi else x
+}
+
+fn max(a: Int, b: Int) -> Int {
+    ensures result >= a
+    ensures result >= b
+    if a > b then a else b
+}
+
+fn min(a: Int, b: Int) -> Int {
+    ensures result <= a
+    ensures result <= b
+    if a < b then a else b
+}

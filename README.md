@@ -98,7 +98,7 @@ graph LR
     style KF fill:#9b59b6,color:#fff
 ```
 
-> **Phase 1** implements the full compiler pipeline from source text through JVM bytecode generation. **Phase 2** adds the knowledge-sharing registry with semantic search, dependency tracking, SMT verification, and an HTTP API. **Phase 3** adds Kotlin interop, a CLI, performance benchmarks, and dogfooding examples. WASM and LLVM backends are planned for future work.
+> **Phase 1** implements the full compiler pipeline from source text through JVM bytecode generation. **Phase 2** adds the knowledge-sharing registry with semantic search, dependency tracking, SMT verification, and an HTTP API. **Phase 3** adds Kotlin interop, a CLI, performance benchmarks, and dogfooding examples. **Phase 4** adds a standard library, fat JAR distribution, standalone examples, and developer documentation. WASM and LLVM backends are planned for future work.
 
 ---
 
@@ -108,11 +108,18 @@ graph LR
 # Build everything
 ./gradlew build
 
-# Run all 262 tests
+# Run all 284 tests
 ./gradlew test
 
-# Compile and run a Sigil program
-./gradlew :compiler:run --args="run example.sigil add 3 4"
+# Use the CLI wrapper (builds automatically on first run)
+./sigil help
+./sigil compile examples/sigil/math.sigil
+./sigil run examples/sigil/math.sigil add 3 4
+# Output: 7
+
+# Or use the fat JAR directly
+./gradlew :compiler:shadowJar
+java -jar compiler/build/libs/sigil.jar help
 
 # Start the registry server
 ./gradlew :registry:run
@@ -152,7 +159,7 @@ Every Sigil program passes through a six-stage verification pipeline before code
 
 ```mermaid
 flowchart TD
-    A["1. Parse"] -->|"Text → Untyped AST"| B["2. Type Check"]
+    A["1. Parse"] -->|"Text -> Untyped AST"| B["2. Type Check"]
     B -->|"Hindley-Milner inference"| C["3. Effect Check"]
     C -->|"Verify declared effects match usage"| D["4. Contract Verify"]
     D -->|"requires/ensures are well-typed"| E["5. Blake3 Hash"]
@@ -276,7 +283,7 @@ fn binary_search(arr: List<Int>, target: Int) -> Option<Int>
 
 ```mermaid
 graph LR
-    A["sort()"] -->|"ensures: is_sorted(result)"| B{"Compiler proves<br/>postcondition ⊇ precondition"}
+    A["sort()"] -->|"ensures: is_sorted(result)"| B{"Compiler proves<br/>postcondition >= precondition"}
     B -->|"satisfies: requires is_sorted(arr)"| C["binary_search()"]
 
     style A fill:#2ecc71,color:#fff
@@ -316,10 +323,10 @@ graph TD
     end
 
     subgraph "Handlers (at service boundary)"
-        RH["RealHttp → actual HTTP client"]
-        MH["MockHttp → test stub"]
-        RD["RealDb → PostgreSQL"]
-        MD["MockDb → in-memory"]
+        RH["RealHttp -> actual HTTP client"]
+        MH["MockHttp -> test stub"]
+        RD["RealDb -> PostgreSQL"]
+        MD["MockDb -> in-memory"]
     end
 
     HTTP --> FN
@@ -338,6 +345,46 @@ graph TD
 ```
 
 Effects propagate through the call graph. If function A calls function B which has `Http`, then A also has `Http` unless it handles it with an effect handler.
+
+---
+
+## Standard Library
+
+Sigil includes built-in functions available in all programs without imports:
+
+### Math
+
+```
+fn safe_abs(x: Int) -> Int {
+    ensures result >= 0
+    abs(x)
+}
+
+fn bounded(x: Int, lo: Int, hi: Int) -> Int {
+    requires lo <= hi
+    max(lo, min(x, hi))
+}
+```
+
+| Function | Signature | Description |
+|---|---|---|
+| `abs(x)` | `Int -> Int` | Absolute value |
+| `min(a, b)` | `(Int, Int) -> Int` | Minimum of two values |
+| `max(a, b)` | `(Int, Int) -> Int` | Maximum of two values |
+
+### String
+
+```
+fn shout(s: String) -> String {
+    str_upper(s)
+}
+```
+
+| Function | Signature | Description |
+|---|---|---|
+| `str_length(s)` | `String -> Int` | String length |
+| `str_upper(s)` | `String -> String` | Uppercase |
+| `str_lower(s)` | `String -> String` | Lowercase |
 
 ---
 
@@ -426,25 +473,103 @@ The `sigil` CLI provides commands for the full agent workflow:
 
 ```bash
 # Compile a .sigil file to JVM bytecode
-sigil compile math.sigil --output-dir ./out
+./sigil compile math.sigil --output-dir ./out
 
 # Compile and execute a function
-sigil run math.sigil add 3 4
+./sigil run examples/sigil/math.sigil add 3 4
 # Output: 7
 
 # Verify without codegen (reports type, effect, contract status)
-sigil verify math.sigil
-# Output:
-#   fn add(a: Int, b: Int) -> Int
-#     Effects: pure
-#     Contracts: none
-#     Tier: 1 (TypeChecked)
+./sigil verify examples/sigil/contracts.sigil --verbose
 
 # Inspect AST details with hashes
-sigil inspect math.sigil
+./sigil inspect examples/sigil/types.sigil
 
 # Show help
-sigil help
+./sigil help
+```
+
+### Distribution
+
+```bash
+# Build the fat JAR (all dependencies included)
+./gradlew :compiler:shadowJar
+
+# Run directly
+java -jar compiler/build/libs/sigil.jar compile myfile.sigil
+
+# Or use the wrapper script (auto-builds on first run)
+./sigil compile myfile.sigil
+```
+
+---
+
+## Example Programs
+
+Standalone `.sigil` files in `examples/sigil/`:
+
+### math.sigil — Arithmetic with contracts
+
+```
+fn divide(a: Int, b: Int) -> Int {
+    requires b != 0
+    a / b
+}
+
+fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+    requires lo <= hi
+    ensures result >= lo
+    ensures result <= hi
+    if x < lo then lo else if x > hi then hi else x
+}
+```
+
+### types.sigil — Algebraic data types
+
+```
+type Color {
+    | Red
+    | Green
+    | Blue
+}
+
+type Shape {
+    | Circle(radius: Int)
+    | Rectangle(width: Int, height: Int)
+}
+```
+
+### contracts.sigil — Contract-focused examples
+
+```
+fn normalize_score(score: Int, max_score: Int) -> Int {
+    requires max_score > 0
+    ensures result >= 0
+    ensures result <= 100
+    let pct = score * 100 / max_score
+    if pct < 0 then 0 else if pct > 100 then 100 else pct
+}
+```
+
+### factorial.sigil — Recursive computation
+
+```
+fn factorial(n: Int) -> Int {
+    ensures result >= 1
+    match n {
+        0 => 1,
+        1 => 1,
+        _ => n * factorial(n - 1)
+    }
+}
+```
+
+Run any example:
+
+```bash
+./sigil run examples/sigil/math.sigil add 3 4        # 7
+./sigil run examples/sigil/math.sigil abs -5          # 5
+./sigil run examples/sigil/factorial.sigil factorial 5 # 120
 ```
 
 ---
@@ -526,40 +651,9 @@ curl -X POST http://localhost:8080/registry/search \
 
 The registry maintains a DAG of which functions reference which other functions. When a function is deprecated or found buggy, all downstream dependents are automatically flagged for re-verification.
 
-```mermaid
-graph TD
-    A["sort<br/>#a7f3b2e"] --> B["search_sorted<br/>#c4d5e6f"]
-    A --> C["deduplicate<br/>#b8c9d0e"]
-    B --> D["find_nearest<br/>#e1f2a3b"]
-    C --> D
-
-    A -.->|"deprecated!"| CASCADE["Cascade: re-verify<br/>B, C, D"]
-
-    style A fill:#e74c3c,color:#fff
-    style CASCADE fill:#f39c12,color:#fff
-    style B fill:#3498db,color:#fff
-    style C fill:#3498db,color:#fff
-    style D fill:#9b59b6,color:#fff
-```
-
 ### SMT Verification (Tier 3)
 
 The registry includes an SMT integration that can formally prove contract correctness. Contracts are translated to SMT-LIB2 format and verified with either the built-in simple solver or an external Z3 solver.
-
-```mermaid
-flowchart LR
-    FN["FnDef with Contracts"] --> ENC["SMT Encoder"]
-    ENC --> SMTLIB["SMT-LIB2 Program"]
-    SMTLIB --> SOLVER{"Solver"}
-    SOLVER -->|"UNSAT"| PROVED["Contract Proved<br/>Tier 3"]
-    SOLVER -->|"SAT"| COUNTER["Counterexample Found"]
-    SOLVER -->|"UNKNOWN"| UNKNOWN["Too Complex<br/>Stay at Tier 2"]
-
-    style FN fill:#9b59b6,color:#fff
-    style PROVED fill:#2ecc71,color:#fff
-    style COUNTER fill:#e74c3c,color:#fff
-    style UNKNOWN fill:#f39c12,color:#fff
-```
 
 ### HTTP API Reference
 
@@ -575,163 +669,9 @@ flowchart LR
 
 ---
 
-## Dogfooding Examples
-
-The `examples/` module demonstrates Sigil used in production-like backend scenarios, called from Kotlin via `SigilModule`.
-
-### Math Utilities
-
-```
-fn abs(x: Int) -> Int { if x < 0 then -x else x }
-
-fn clamp(x: Int, lo: Int, hi: Int) -> Int {
-    requires lo <= hi
-    ensures result >= lo
-    ensures result <= hi
-    if x < lo then lo else if x > hi then hi else x
-}
-```
-
-### Validated Scoring
-
-```
-fn weighted_score(base: Int, bonus: Int, multiplier: Int) -> Int {
-    requires multiplier > 0
-    ensures result >= 0
-    let raw = base * multiplier + bonus
-    if raw < 0 then 0 else raw
-}
-
-fn normalize_score(score: Int, max_score: Int) -> Int {
-    requires max_score > 0
-    ensures result >= 0
-    ensures result <= 100
-    let pct = score * 100 / max_score
-    if pct < 0 then 0 else if pct > 100 then 100 else pct
-}
-```
-
-### Running the Demo
-
-```bash
-./gradlew :examples:run
-```
-
-```
-=== Sigil Dogfooding Demo ===
-
-abs(-42) = 42
-clamp(150, 0, 100) = 100
-max(7, 12) = 12
-weighted_score(10, 5, 3) = 35
-normalize_score(75, 200) = 37
-Contract caught: safe_divide(10, 0) → Requires contract violated
-```
-
----
-
-## Performance
-
-Benchmarks comparing Sigil-compiled JVM code against equivalent hand-written Kotlin:
-
-| Benchmark | Sigil | Kotlin | Ratio |
-|---|---|---|---|
-| Simple arithmetic (add, square) | ~150ns | ~25ns | ~6x |
-| Complex expressions | ~200ns | ~30ns | ~7x |
-| Conditional logic | ~180ns | ~28ns | ~6x |
-
-The overhead is primarily from reflection (`Method.invoke`) at the Kotlin boundary, not from codegen quality. The JIT-compiled Sigil bytecode itself is equivalent to Kotlin bytecode. Contract checking adds negligible overhead (~0-1%).
-
-**Compilation throughput:** ~15-20K functions/sec (parse ~14us, hash ~10us, codegen ~4us).
-
-**Blake3 hashing:** 116-259 MB/s depending on input size.
-
-Run benchmarks with `./gradlew :compiler:test --tests "sigil.bench.*"`.
-
----
-
-## AST Node Hierarchy
-
-```mermaid
-classDiagram
-    class FnDef {
-        +name: Alias
-        +params: List~Param~
-        +returnType: TypeRef
-        +contract: ContractNode?
-        +effects: EffectSet
-        +body: ExprNode
-        +hash: Hash?
-    }
-
-    class TypeDef {
-        +name: Alias
-        +typeParams: List~TypeVar~
-        +variants: List~Variant~
-        +hash: Hash?
-    }
-
-    class ExprNode {
-        <<sealed>>
-    }
-
-    ExprNode <|-- Literal
-    ExprNode <|-- Apply
-    ExprNode <|-- Match
-    ExprNode <|-- Let
-    ExprNode <|-- Lambda
-    ExprNode <|-- Ref
-    ExprNode <|-- If
-    ExprNode <|-- Block
-
-    class Literal {
-        +value: LiteralValue
-    }
-    class Apply {
-        +fn: ExprNode
-        +args: List~ExprNode~
-    }
-    class Match {
-        +scrutinee: ExprNode
-        +arms: List~MatchArm~
-    }
-    class Let {
-        +binding: Alias
-        +value: ExprNode
-        +body: ExprNode
-    }
-    class Ref {
-        +hash: Hash
-    }
-
-    class ContractNode {
-        +requires: List~ContractClause~
-        +ensures: List~ContractClause~
-    }
-
-    class TraitDef {
-        +name: Alias
-        +methods: List~FnSignature~
-        +laws: List~Property~
-        +hash: Hash?
-    }
-
-    class EffectDef {
-        +name: Alias
-        +operations: List~EffectOperation~
-        +hash: Hash?
-    }
-
-    FnDef --> ExprNode : body
-    FnDef --> ContractNode : contract
-    FnDef --> TypeRef : returnType
-```
-
----
-
 ## Language Syntax
 
-Sigil uses 15 keywords and a syntax inspired by Rust/Kotlin/ML:
+Sigil uses 15 keywords and a syntax inspired by Rust/Kotlin/ML. A complete formal grammar is available in [`docs/grammar.ebnf`](docs/grammar.ebnf).
 
 ```
 fn  type  trait  effect  module  export  handler
@@ -839,7 +779,7 @@ trait Monoid<T> {
 
 ### Prerequisites
 
-- **JDK 21+** (tested with OpenJDK 23)
+- **JDK 23+** (tested with OpenJDK 23)
 - **Gradle** (wrapper included)
 
 ### Build
@@ -860,14 +800,15 @@ trait Monoid<T> {
 ./gradlew :examples:test
 ```
 
-**262 tests** across 3 modules and 18 test suites:
+**284 tests** across 3 modules and 19 test suites:
 
-#### Compiler (140 tests)
+#### Compiler (162 tests)
 
 | Suite | Tests | Coverage |
 |---|---|---|
 | `TypeCheckerTest` | 29 | HM inference, pattern matching, generics, error cases |
 | `ParserTest` | 24 | Lexer, all grammar constructs, spec examples |
+| `StdlibTest` | 22 | Built-in functions: parsing, type checking, codegen, end-to-end |
 | `InteropTest` | 15 | SigilModule, type mapping, contract bridge |
 | `IntegrationTest` | 13 | Full end-to-end pipeline: parse, check, hash, compile, execute |
 | `CliTest` | 13 | CLI commands: compile, run, verify, inspect, help |
@@ -977,83 +918,43 @@ println("Found: ${results.size} results")
 
 ```
 sigil/
-  build.gradle.kts                     # Root build (Kotlin 2.1.10, v0.3.0)
+  build.gradle.kts                     # Root build (Kotlin 2.1.10, v0.4.0)
   settings.gradle.kts                  # Includes compiler, registry, examples
+  sigil                                # CLI wrapper script (auto-builds fat JAR)
+  CONTRIBUTING.md                      # Developer guide
+  docs/
+    grammar.ebnf                       # Formal grammar specification (EBNF)
 
-  compiler/                            # Phase 1: Compiler
+  compiler/                            # Phase 1: Compiler + Phase 3: Interop + Phase 4: Stdlib
     src/main/kotlin/sigil/
       ast/                             # AST node data classes (12 files)
-        ExprNode.kt                    #   Expression nodes (sealed class, 8 variants)
-        FnDef.kt                       #   Function definition
-        TypeDef.kt                     #   Algebraic data types
-        ContractNode.kt                #   requires/ensures contracts
-        EffectDef.kt                   #   Effect declarations
-        TraitDef.kt                    #   Trait definitions
-        ModuleDef.kt                   #   Module definitions
-        TypeRef.kt                     #   Type references & type variables
-        RefinementType.kt              #   Refinement types
-        EffectHandler.kt               #   Effect handler implementations
-        Types.kt                       #   Primitive type constants
-        Metadata.kt                    #   SemanticMeta, VerificationRecord
-      hash/                            # Content-addressing
-        Blake3.kt                      #   Pure Kotlin Blake3 implementation
-        Hasher.kt                      #   Canonical AST serialization
-      types/                           # Type system
-        TypeChecker.kt                 #   Hindley-Milner type inference
-        Unifier.kt                     #   Constraint unification (Algorithm W)
-        TraitResolver.kt               #   Trait bound checking
-      contracts/                       # Contract system
-        ContractVerifier.kt            #   Contract validation + chaining
-        PropertyTester.kt              #   Property-based testing (QuickCheck-style)
-      effects/                         # Effect system
-        EffectChecker.kt               #   Effect tracking + propagation
-      codegen/jvm/                     # JVM backend
-        JvmCodegen.kt                  #   ASM bytecode generation
-        JvmLinker.kt                   #   ClassLoader for compiled code
-        LocalVarTable.kt               #   Local variable index tracking
-        ContractViolation.kt           #   Runtime exception for contract failures
-      parser/                          # Text syntax
-        SigilLexer.kt                  #   Tokenizer
-        SigilParser.kt                 #   Recursive descent parser
-      interop/                         # Phase 3: Kotlin interop
-        SigilModule.kt                 #   Runtime container for compiled modules
-        KotlinTypeMapper.kt            #   Sigil ↔ Kotlin type mappings
-        ContractBridge.kt              #   Contract enforcement at boundary
-      api/                             # Entry points
-        SigilCompiler.kt               #   Unified compilation pipeline
-        Cli.kt                         #   CLI command dispatcher
-        Main.kt                        #   CLI entry point
-    src/test/kotlin/sigil/             # 140 tests (+ benchmarks)
+      hash/                            # Content-addressing (Blake3, Hasher)
+      types/                           # Type system (TypeChecker, Unifier, TraitResolver)
+      contracts/                       # Contract system (ContractVerifier, PropertyTester)
+      effects/                         # Effect system (EffectChecker)
+      codegen/jvm/                     # JVM backend (JvmCodegen, JvmLinker, LocalVarTable)
+      parser/                          # Text syntax (SigilLexer, SigilParser)
+      interop/                         # Kotlin interop (SigilModule, ContractBridge)
+      api/                             # Entry points (SigilCompiler, Cli, Main)
+    src/test/kotlin/sigil/             # 162 tests
 
   registry/                            # Phase 2: Registry Infrastructure
     src/main/kotlin/sigil/registry/
-      store/                           # Content-addressed storage
-        RegistryStore.kt               #   Storage interface
-        InMemoryStore.kt               #   HashMap-based (testing/dev)
-        MongoStore.kt                  #   MongoDB backend (production)
-        RegistryNode.kt                #   RegistryNode, NodeMetadata, SemanticSignature
+      store/                           # Content-addressed storage (InMemory, Mongo)
       semantic/                        # Semantic indexing & search
-        SemanticExtractor.kt           #   Extract signatures from AST nodes
-        SemanticSearch.kt              #   SearchQuery, SearchResult, scoring engine
-      deps/                            # Dependency tracking
-        DependencyTracker.kt           #   DAG traversal, cascade deprecation
-      smt/                             # SMT verification
-        SmtEncoder.kt                  #   Contract → SMT-LIB2 translation
-        SmtSolver.kt                   #   SimpleSmtSolver, Z3SmtSolver
-      api/                             # HTTP API
-        ApiModels.kt                   #   Request/response data classes
-        RegistryService.kt             #   Business logic (orchestrates all components)
-        RegistryRoutes.kt              #   Ktor route definitions
-        Main.kt                        #   Server startup (Netty)
+      deps/                            # Dependency tracking (DAG)
+      smt/                             # SMT verification (encoder, solver)
+      api/                             # HTTP API (Ktor routes, service)
     src/test/kotlin/sigil/registry/    # 79 tests
 
-  examples/                            # Phase 3: Dogfooding
-    src/main/kotlin/sigil/examples/
-      SigilPrograms.kt                 #   Sigil source (math, validators, scoring)
-      Main.kt                          #   Demo application
+  examples/                            # Phase 3: Dogfooding + Phase 4: Examples
+    sigil/                             # Standalone .sigil source files
+      math.sigil                       # Arithmetic with contracts
+      types.sigil                      # Algebraic data types
+      contracts.sigil                  # Contract-focused examples
+      factorial.sigil                  # Recursive computation
+    src/main/kotlin/sigil/examples/    # Kotlin demo application
     src/test/kotlin/sigil/             # 43 tests
-      examples/ExamplesTest.kt         #   Function tests, contract violations
-      Phase3IntegrationTest.kt         #   Cross-module integration tests
 ```
 
 ---
@@ -1083,6 +984,26 @@ graph BT
 
 ---
 
+## Performance
+
+Benchmarks comparing Sigil-compiled JVM code against equivalent hand-written Kotlin:
+
+| Benchmark | Sigil | Kotlin | Ratio |
+|---|---|---|---|
+| Simple arithmetic (add, square) | ~150ns | ~25ns | ~6x |
+| Complex expressions | ~200ns | ~30ns | ~7x |
+| Conditional logic | ~180ns | ~28ns | ~6x |
+
+The overhead is primarily from reflection (`Method.invoke`) at the Kotlin boundary, not from codegen quality. The JIT-compiled Sigil bytecode itself is equivalent to Kotlin bytecode. Contract checking adds negligible overhead (~0-1%).
+
+**Compilation throughput:** ~15-20K functions/sec (parse ~14us, hash ~10us, codegen ~4us).
+
+**Blake3 hashing:** 116-259 MB/s depending on input size.
+
+Run benchmarks with `./gradlew :compiler:test --tests "sigil.bench.*"`.
+
+---
+
 ## Roadmap
 
 ```mermaid
@@ -1091,7 +1012,7 @@ gantt
     dateFormat YYYY-MM
     axisFormat %b %Y
 
-    section Phase 1 — Compiler
+    section Phase 1 -- Compiler
     AST Data Structures           :done, 2026-03, 2026-03
     Blake3 Hashing                :done, 2026-03, 2026-03
     Type Checker (HM)             :done, 2026-03, 2026-03
@@ -1101,7 +1022,7 @@ gantt
     Text Parser                   :done, 2026-03, 2026-03
     Integration Tests             :done, 2026-03, 2026-03
 
-    section Phase 2 — Registry
+    section Phase 2 -- Registry
     Content-Addressed Storage     :done, 2026-03, 2026-03
     Semantic Signature Indexing   :done, 2026-03, 2026-03
     Dependency Tracking DAG       :done, 2026-03, 2026-03
@@ -1109,22 +1030,30 @@ gantt
     Ktor HTTP API                 :done, 2026-03, 2026-03
     Integration Tests             :done, 2026-03, 2026-03
 
-    section Phase 3 — Dogfooding
+    section Phase 3 -- Dogfooding
     Kotlin Interop Layer          :done, 2026-03, 2026-03
     Agent Workflow CLI             :done, 2026-03, 2026-03
     Performance Benchmarks         :done, 2026-03, 2026-03
     Dogfooding Examples            :done, 2026-03, 2026-03
     Integration Tests              :done, 2026-03, 2026-03
 
+    section Phase 4 -- Developer Experience
+    Standard Library (builtins)    :done, 2026-03, 2026-03
+    Fat JAR Distribution           :done, 2026-03, 2026-03
+    Standalone .sigil Examples     :done, 2026-03, 2026-03
+    CONTRIBUTING.md                :done, 2026-03, 2026-03
+    Formal Grammar Spec (EBNF)     :done, 2026-03, 2026-03
+
     section Future
     WASM Backend                  :2026-04, 2026-06
     LLVM Backend                  :2026-05, 2026-07
-    Standard Library               :2026-04, 2026-08
+    Module Import System           :2026-04, 2026-05
+    Extended Standard Library      :2026-04, 2026-08
 ```
 
 ### What's Implemented
 
-**Phase 1 — Compiler:**
+**Phase 1 -- Compiler:**
 - Full AST node type system with `@Serializable` annotations
 - Pure Kotlin Blake3 implementation (256-bit, deterministic)
 - Canonical AST serialization for content-addressing
@@ -1135,7 +1064,7 @@ gantt
 - Recursive descent parser for the full text syntax
 - Unified `SigilCompiler` pipeline API
 
-**Phase 2 — Registry:**
+**Phase 2 -- Registry:**
 - Content-addressed storage with InMemoryStore and MongoStore backends
 - Semantic signature extraction from FnDef, TypeDef, and TraitDef
 - Type-aware search with multi-factor scoring (type match, contracts, effects, tags, text)
@@ -1145,9 +1074,8 @@ gantt
 - Z3SmtSolver integration (shells out to z3 CLI with fallback)
 - Contract chaining verification (proves composition safety)
 - Ktor HTTP API with publish, search, get, deprecate, and stats endpoints
-- CORS, content negotiation, and error handling middleware
 
-**Phase 3 — Dogfooding:**
+**Phase 3 -- Dogfooding:**
 - Kotlin interop layer (`SigilModule`) for calling Sigil from Kotlin with one line
 - Type-safe contract enforcement at the Kotlin boundary (STRICT/WARN/MONITOR modes)
 - Bidirectional type mapping between Sigil and Kotlin/JVM types
@@ -1156,11 +1084,19 @@ gantt
 - Dogfooding examples: math utilities, validators, scoring computations
 - End-to-end integration tests across compiler + registry + examples
 
+**Phase 4 -- Developer Experience:**
+- Built-in standard library functions (abs, min, max, str_length, str_upper, str_lower)
+- Fat JAR distribution with `./sigil` wrapper script
+- Standalone `.sigil` example files (math, types, contracts, factorial)
+- CONTRIBUTING.md with build instructions, architecture overview, PR process
+- Formal grammar specification in EBNF (`docs/grammar.ebnf`)
+
 ### What's Planned
 
 - **WASM Backend:** Edge functions, serverless, browser-based tooling
 - **LLVM Backend:** Native performance-critical paths
-- **Standard Library:** Core collection operations, string utilities, common patterns
+- **Module Import System:** Cross-file function references and linking
+- **Extended Standard Library:** Collections, I/O, common patterns
 
 ---
 
@@ -1178,7 +1114,9 @@ gantt
 
 ## Contributing
 
-Sigil is designed to be built *by* agents, *for* agents. The agent contribution protocol is:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build instructions, architecture overview, code style, and PR process.
+
+**Agent contribution protocol:**
 
 1. Construct an AST node (as JSON or Kotlin objects) or write Sigil source text
 2. Submit to the registry via HTTP API or programmatic `RegistryService`

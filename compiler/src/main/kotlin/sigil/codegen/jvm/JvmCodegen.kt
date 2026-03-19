@@ -32,7 +32,11 @@ class JvmCodegen {
 
         val locals = LocalVarTable()
         for (param in fn.params) {
-            locals.declare(param.name, isWide(param.type))
+            if (isRefType(param.type)) {
+                locals.declareRef(param.name)
+            } else {
+                locals.declare(param.name, isWide(param.type))
+            }
         }
 
         // Emit requires contract checks
@@ -188,8 +192,8 @@ class JvmCodegen {
         // Check if it's a local variable name (params are registered by name)
         try {
             val slot = locals.lookup(hash)
-            // It's a local variable
-            mv.visitVarInsn(LLOAD, slot) // default to long load
+            // It's a local variable - use the appropriate load instruction
+            mv.visitVarInsn(locals.loadInsn(hash), slot)
             return
         } catch (_: CompileError) {
             // Not a local, might be a function ref
@@ -274,6 +278,21 @@ class JvmCodegen {
             "#sigil:gte" -> compileLongComparison(args, mv, locals, IFLT)
             "#sigil:lte" -> compileLongComparison(args, mv, locals, IFGT)
             "#sigil:neq" -> compileLongComparison(args, mv, locals, IFEQ)
+            "#sigil:min" -> {
+                compileExpr(args[0], mv, locals)
+                compileExpr(args[1], mv, locals)
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "min", "(JJ)J", false)
+            }
+            "#sigil:max" -> {
+                compileExpr(args[0], mv, locals)
+                compileExpr(args[1], mv, locals)
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "max", "(JJ)J", false)
+            }
+            "#sigil:concat" -> {
+                compileExpr(args[0], mv, locals)
+                compileExpr(args[1], mv, locals)
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", false)
+            }
             else -> return false
         }
         return true
@@ -319,6 +338,23 @@ class JvmCodegen {
                 mv.visitLabel(falseLabel)
                 mv.visitInsn(ICONST_0)
                 mv.visitLabel(endLabel)
+            }
+            "#sigil:abs" -> {
+                compileExpr(arg, mv, locals)
+                mv.visitMethodInsn(INVOKESTATIC, "java/lang/Math", "abs", "(J)J", false)
+            }
+            "#sigil:str_length" -> {
+                compileExpr(arg, mv, locals)
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
+                mv.visitInsn(I2L)
+            }
+            "#sigil:str_upper" -> {
+                compileExpr(arg, mv, locals)
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "toUpperCase", "()Ljava/lang/String;", false)
+            }
+            "#sigil:str_lower" -> {
+                compileExpr(arg, mv, locals)
+                mv.visitMethodInsn(INVOKEVIRTUAL, "java/lang/String", "toLowerCase", "()Ljava/lang/String;", false)
             }
             else -> return false
         }
@@ -506,6 +542,14 @@ class JvmCodegen {
         typeRef.defHash == PrimitiveTypes.INT ||
         typeRef.defHash == PrimitiveTypes.INT64 ||
         typeRef.defHash == PrimitiveTypes.FLOAT64
+
+    private fun isRefType(typeRef: TypeRef): Boolean =
+        typeRef.defHash == PrimitiveTypes.STRING ||
+        typeRef.defHash == PrimitiveTypes.BYTES ||
+        typeRef.defHash == PrimitiveTypes.LIST ||
+        typeRef.defHash == PrimitiveTypes.MAP ||
+        typeRef.defHash == PrimitiveTypes.OPTION ||
+        (!isWide(typeRef) && typeRef.defHash != PrimitiveTypes.BOOL && typeRef.defHash != PrimitiveTypes.INT32 && typeRef.defHash != PrimitiveTypes.UNIT)
 
     private fun returnInsn(typeRef: TypeRef): Int = when (typeRef.defHash) {
         PrimitiveTypes.INT, PrimitiveTypes.INT64 -> LRETURN

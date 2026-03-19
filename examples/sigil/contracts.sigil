@@ -1,0 +1,35 @@
+// Contract-focused examples: requires and ensures
+
+fn safe_divide(a: Int, b: Int) -> Int {
+    requires b != 0
+    a / b
+}
+
+fn positive_add(a: Int, b: Int) -> Int {
+    requires a > 0
+    requires b > 0
+    ensures result > 0
+    a + b
+}
+
+fn bounded_increment(x: Int, bound: Int) -> Int {
+    requires x < bound
+    ensures result <= bound
+    let next = x + 1
+    if next > bound then bound else next
+}
+
+fn normalize_score(score: Int, max_score: Int) -> Int {
+    requires max_score > 0
+    ensures result >= 0
+    ensures result <= 100
+    let pct = score * 100 / max_score
+    if pct < 0 then 0 else if pct > 100 then 100 else pct
+}
+
+fn weighted_score(base: Int, bonus: Int, multiplier: Int) -> Int {
+    requires multiplier > 0
+    ensures result >= 0
+    let raw = base * multiplier + bonus
+    if raw < 0 then 0 else raw
+}

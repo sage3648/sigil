@@ -1,0 +1,36 @@
+// Algebraic data types
+
+type Color {
+    | Red
+    | Green
+    | Blue
+}
+
+type Shape {
+    | Circle(radius: Int)
+    | Rectangle(w: Int, h: Int)
+}
+
+// Functions using Int arithmetic (no pattern matching on constructors needed)
+
+fn circle_area(radius: Int) -> Int {
+    requires radius >= 0
+    ensures result >= 0
+    radius * radius * 3
+}
+
+fn rectangle_area(w: Int, h: Int) -> Int {
+    requires w >= 0
+    requires h >= 0
+    ensures result >= 0
+    w * h
+}
+
+fn color_to_int(c: Int) -> Int {
+    match c {
+        0 => 255,
+        1 => 65280,
+        2 => 16711680,
+        _ => 0
+    }
+}

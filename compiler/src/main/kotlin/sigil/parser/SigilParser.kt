@@ -39,6 +39,15 @@ class SigilParser(private val tokens: List<Token>) {
         TokenType.PLUS_PLUS to "#sigil:concat",
     )
 
+    private val stdlibFnMap = mapOf(
+        "abs" to "#sigil:abs",
+        "min" to "#sigil:min",
+        "max" to "#sigil:max",
+        "str_length" to "#sigil:str_length",
+        "str_upper" to "#sigil:str_upper",
+        "str_lower" to "#sigil:str_lower",
+    )
+
     private fun current(): Token = tokens[pos]
     private fun peek(): Token = tokens[pos]
 
@@ -555,7 +564,13 @@ class SigilParser(private val tokens: List<Token>) {
             }
             TokenType.IDENT -> {
                 val name = advance().value
-                ExprNode.Ref(name)
+                // Only resolve stdlib names when used in function call position
+                val resolved = if (current().type == TokenType.LPAREN && name in stdlibFnMap) {
+                    stdlibFnMap[name]!!
+                } else {
+                    name
+                }
+                ExprNode.Ref(resolved)
             }
             else -> throw ParseError("Unexpected token ${current().type} '${current().value}'", current().line, current().col)
         }

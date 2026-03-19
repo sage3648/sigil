@@ -1,0 +1,321 @@
+(* Sigil Formal Grammar -- EBNF Notation *)
+(* Reference: SigilLexer.kt, SigilParser.kt *)
+
+(* ================================================================ *)
+(* Top-Level Program                                                 *)
+(* ================================================================ *)
+
+program        = { NEWLINE } , { top_level , { NEWLINE } } , EOF ;
+
+top_level      = fn_def
+               | type_def
+               | trait_def
+               | effect_def
+               | handler_def
+               | module_def
+               | property ;
+
+(* ================================================================ *)
+(* Declarations                                                      *)
+(* ================================================================ *)
+
+fn_def         = "fn" , IDENT , [ type_params ] ,
+                 "(" , param_list , ")" ,
+                 [ "->" , type_ref ] ,
+                 [ effect_annotation ] ,
+                 "{" , { NEWLINE } ,
+                 { requires_clause , { NEWLINE } } ,
+                 { ensures_clause , { NEWLINE } } ,
+                 block_body ,
+                 "}" ;
+
+requires_clause = "requires" , expr ;
+ensures_clause  = "ensures" , expr ;
+
+type_def       = "type" , IDENT , [ type_params ] ,
+                 "{" , { NEWLINE } ,
+                 { variant , { NEWLINE } } ,
+                 "}" ;
+
+variant        = "|" , IDENT , [ "(" , param_list , ")" ] ;
+
+trait_def      = "trait" , IDENT , [ type_params ] ,
+                 "{" , { NEWLINE } ,
+                 { ( fn_signature | property ) , { NEWLINE } } ,
+                 "}" ;
+
+fn_signature   = "fn" , IDENT ,
+                 "(" , param_list , ")" ,
+                 [ "->" , type_ref ] ,
+                 [ effect_annotation ] ;
+
+effect_def     = "effect" , IDENT ,
+                 "{" , { NEWLINE } ,
+                 { effect_operation , { NEWLINE } } ,
+                 "}" ;
+
+effect_operation = "fn" , IDENT ,
+                   "(" , param_list , ")" ,
+                   [ "->" , type_ref ] ;
+
+handler_def    = "handler" , IDENT , ":" , IDENT ,
+                 "{" , { NEWLINE } ,
+                 { handler_impl , { NEWLINE } } ,
+                 "}" ;
+
+handler_impl   = "fn" , IDENT ,
+                 "(" , param_list , ")" ,
+                 [ "->" , type_ref ] ,
+                 "{" , { NEWLINE } , block_body , "}" ;
+
+module_def     = "module" , IDENT ,
+                 "{" , { NEWLINE } ,
+                 { ( "export" , IDENT | IDENT ) , { NEWLINE } } ,
+                 "}" ;
+
+property       = "property" , [ "(" , param_list , ")" ] ,
+                 "{" , { NEWLINE } , expr , { NEWLINE } , "}" ;
+
+(* ================================================================ *)
+(* Type System                                                       *)
+(* ================================================================ *)
+
+type_params    = "<" , type_var , { "," , type_var } , ">" ;
+
+type_var       = IDENT , [ ":" , IDENT , { "+" , IDENT } ] ;
+
+type_ref       = HASH_REF
+               | "(" , ")"                                (* Unit type *)
+               | IDENT , [ "<" , type_ref , { "," , type_ref } , ">" ] ;
+
+param_list     = [ param , { "," , [ param ] } ] ;
+               (* trailing comma is tolerated *)
+
+param          = IDENT , ":" , type_ref ;
+
+effect_annotation = "!" , IDENT , { "," , { NEWLINE } , IDENT } ;
+
+(* ================================================================ *)
+(* Expressions                                                       *)
+(*                                                                   *)
+(* Precedence (lowest to highest):                                   *)
+(*   1. let                                                          *)
+(*   2. || (logical or)                                              *)
+(*   3. && (logical and)                                             *)
+(*   4. == != (equality)                                             *)
+(*   5. < > <= >= (comparison)                                       *)
+(*   6. ++ (concatenation)                                           *)
+(*   7. + - (additive)                                               *)
+(*   8. * / % (multiplicative)                                       *)
+(*   9. unary - (negation)                                           *)
+(*  10. postfix: function call, field access, method call            *)
+(*  11. primary: literals, refs, if, match, lambda, list, parens     *)
+(*                                                                   *)
+(* All binary operators are left-associative.                        *)
+(* ================================================================ *)
+
+expr           = let_expr | or_expr ;
+
+let_expr       = "let" , IDENT , [ ":" , type_ref ] , "=" , expr ,
+                 { NEWLINE } , [ expr ] ;
+               (* If no body follows, the body is implicitly Unit.   *)
+               (* A body is parsed when the next token is not        *)
+               (*   RBRACE, EOF, COMMA, or RPAREN.                   *)
+
+or_expr        = and_expr , { "||" , and_expr } ;
+
+and_expr       = equality_expr , { "&&" , equality_expr } ;
+
+equality_expr  = comparison_expr , { ( "==" | "!=" ) , comparison_expr } ;
+
+comparison_expr = concat_expr , { ( "<" | ">" | "<=" | ">=" ) , concat_expr } ;
+
+concat_expr    = add_expr , { "++" , add_expr } ;
+
+add_expr       = mul_expr , { ( "+" | "-" ) , mul_expr } ;
+
+mul_expr       = unary_expr , { ( "*" | "/" | "%" ) , unary_expr } ;
+
+unary_expr     = "-" , unary_expr
+               | postfix_expr ;
+
+postfix_expr   = primary , { postfix_op } ;
+
+postfix_op     = "(" , arg_list , ")"                     (* function call *)
+               | "." , IDENT , "(" , arg_list , ")"       (* method call *)
+               | "." , IDENT ;                            (* field access *)
+
+primary        = INT_LIT
+               | FLOAT_LIT
+               | STRING_LIT
+               | "true"
+               | "false"
+               | HASH_REF
+               | if_expr
+               | match_expr
+               | lambda_expr
+               | list_literal
+               | "(" , ")"                                (* unit literal *)
+               | "(" , expr , ")"                         (* grouped expr *)
+               | IDENT ;                                  (* reference *)
+
+if_expr        = "if" , expr , "then" , expr , "else" , expr ;
+
+match_expr     = "match" , expr ,
+                 "{" , { NEWLINE } ,
+                 { match_arm , [ "," ] , { NEWLINE } } ,
+                 "}" ;
+
+match_arm      = pattern , "=>" , expr ;
+
+lambda_expr    = "|" , [ lambda_param , { "," , lambda_param } ] , "|" ,
+                 [ "->" ] , expr ;
+
+lambda_param   = IDENT , [ ":" , type_ref ] ;
+               (* If no type annotation, type is inferred. *)
+
+list_literal   = "[" , { NEWLINE } ,
+                 [ expr , { "," , { NEWLINE } , expr } , [ "," ] ] ,
+                 { NEWLINE } , "]" ;
+
+arg_list       = { NEWLINE } ,
+                 [ expr , { "," , { NEWLINE } , expr } , [ "," ] ] ;
+
+block_body     = { NEWLINE } , { expr , { NEWLINE } } ;
+               (* A block of one expression unwraps to that expr.    *)
+               (* A block of multiple expressions becomes Block(...).*)
+
+(* ================================================================ *)
+(* Patterns                                                          *)
+(* ================================================================ *)
+
+pattern        = "_"                                      (* wildcard *)
+               | INT_LIT                                  (* integer literal *)
+               | FLOAT_LIT                                (* float literal *)
+               | STRING_LIT                               (* string literal *)
+               | "true"                                   (* boolean literal *)
+               | "false"                                  (* boolean literal *)
+               | UPPER_IDENT , "(" , [ pattern , { "," , pattern } ] , ")"
+                                                          (* constructor with fields *)
+               | UPPER_IDENT                              (* constructor, no fields *)
+               | LOWER_IDENT                              (* binding pattern *)
+               | "(" , [ pattern , { "," , pattern } ] , ")"
+                                                          (* tuple pattern *)
+               | "[" , [ pattern , { "," , pattern } ] , "]" ;
+                                                          (* list pattern *)
+
+(* Constructor vs binding disambiguation:                            *)
+(*   Identifiers starting with uppercase are constructors.           *)
+(*   Identifiers starting with lowercase are bindings.               *)
+
+(* ================================================================ *)
+(* Tokens                                                            *)
+(* ================================================================ *)
+
+(* --- Keywords --- *)
+(* fn  type  trait  effect  module  export  handler                  *)
+(* let  match  if  then  else  requires  ensures  property           *)
+(* true  false                                                       *)
+
+(* --- Literals --- *)
+INT_LIT        = digit , { digit } ;
+FLOAT_LIT      = digit , { digit } , "." , digit , { digit } ;
+STRING_LIT     = '"' , { string_char } , '"' ;
+string_char    = (* any character except '"' and '\' *)
+               | "\" , ( "n" | "t" | "\" | '"' ) ;
+
+(* --- Identifiers --- *)
+IDENT          = ( letter | "_" ) , { letter | digit | "_" } ;
+UPPER_IDENT    = upper_letter , { letter | digit | "_" } ;
+               (* IDENT where the first character is uppercase *)
+LOWER_IDENT    = ( lower_letter | "_" ) , { letter | digit | "_" } ;
+               (* IDENT where the first character is lowercase or _ *)
+
+(* Note: standalone "_" (not followed by alphanumeric or _) is       *)
+(* lexed as UNDERSCORE, not IDENT.                                   *)
+
+(* --- Hash References --- *)
+HASH_REF       = "#" , { letter | digit | ":" | "_" | "-" } ;
+
+(* --- Operators --- *)
+(* Single-character:  +  -  *  /  %  <  >  !  =  .  :  ,  |        *)
+(* Multi-character:                                                  *)
+(*   ->   arrow (return type, lambda body)                           *)
+(*   =>   fat arrow (match arms)                                    *)
+(*   ==   equality                                                   *)
+(*   !=   not equal                                                  *)
+(*   <=   less or equal                                              *)
+(*   >=   greater or equal                                           *)
+(*   &&   logical and                                                *)
+(*   ||   logical or                                                 *)
+(*   ++   concatenation                                              *)
+
+(* --- Delimiters --- *)
+(*   (  )  {  }  [  ]                                                *)
+
+(* --- Special --- *)
+NEWLINE        = "\n" ;
+(* Newlines are significant -- they separate expressions in blocks   *)
+(* and declarations at the top level. The parser skips them where    *)
+(* they are not meaningful (inside parameter lists, after braces).   *)
+
+(* --- Whitespace and Comments --- *)
+(* Spaces, tabs, and carriage returns are skipped by the lexer.      *)
+(* Line comments start with // and extend to end of line.            *)
+
+(* --- Lexer Disambiguation Rules --- *)
+(* "|" vs "||": single pipe is PIPE, double pipe is OR              *)
+(* "&" is invalid alone; "&&" is AND                                 *)
+(* "=" vs "==" vs "=>": single is EQUALS, double is EQ, arrow is    *)
+(*   FAT_ARROW                                                      *)
+(* "!" vs "!=": single is BANG (effect annotation), with = is NEQ   *)
+(* "<" vs "<=": single is LT, with = is LTE                        *)
+(* ">" vs ">=": single is GT, with = is GTE                        *)
+(* "-" vs "->": single is MINUS, with > is ARROW                   *)
+(* "+" vs "++": single is PLUS, double is PLUS_PLUS (concat)       *)
+
+(* ================================================================ *)
+(* Binary Operator Semantics                                         *)
+(* ================================================================ *)
+
+(* All binary operators desugar to function application:             *)
+(*   a + b   -->  Apply(Ref("#sigil:add"), [a, b])                  *)
+(*   a - b   -->  Apply(Ref("#sigil:sub"), [a, b])                  *)
+(*   a * b   -->  Apply(Ref("#sigil:mul"), [a, b])                  *)
+(*   a / b   -->  Apply(Ref("#sigil:div"), [a, b])                  *)
+(*   a % b   -->  Apply(Ref("#sigil:mod"), [a, b])                  *)
+(*   a == b  -->  Apply(Ref("#sigil:eq"), [a, b])                   *)
+(*   a != b  -->  Apply(Ref("#sigil:neq"), [a, b])                  *)
+(*   a < b   -->  Apply(Ref("#sigil:lt"), [a, b])                   *)
+(*   a > b   -->  Apply(Ref("#sigil:gt"), [a, b])                   *)
+(*   a <= b  -->  Apply(Ref("#sigil:lte"), [a, b])                  *)
+(*   a >= b  -->  Apply(Ref("#sigil:gte"), [a, b])                  *)
+(*   a && b  -->  Apply(Ref("#sigil:and"), [a, b])                  *)
+(*   a || b  -->  Apply(Ref("#sigil:or"), [a, b])                   *)
+(*   a ++ b  -->  Apply(Ref("#sigil:concat"), [a, b])               *)
+(*   -a      -->  Apply(Ref("#sigil:neg"), [a])                     *)
+
+(* Method call desugaring:                                           *)
+(*   a.f(b, c)  -->  Apply(Ref("f"), [a, b, c])                    *)
+
+(* Field access desugaring:                                          *)
+(*   a.x  -->  Apply(Ref("#sigil:field"), [a, "x"])                 *)
+
+(* ================================================================ *)
+(* Primitive Types                                                   *)
+(* ================================================================ *)
+
+(* The following identifiers are recognized as primitive types and    *)
+(* mapped to hash references by the parser:                          *)
+(*   Int     -> #sigil:int                                           *)
+(*   I32     -> #sigil:i32                                           *)
+(*   I64     -> #sigil:i64                                           *)
+(*   F64     -> #sigil:f64                                           *)
+(*   Bool    -> #sigil:bool                                          *)
+(*   String  -> #sigil:string                                        *)
+(*   Unit    -> #sigil:unit                                          *)
+(*   Bytes   -> #sigil:bytes                                         *)
+(*   List    -> #sigil:list                                          *)
+(*   Map     -> #sigil:map                                           *)
+(*   Option  -> #sigil:option                                        *)
+(*   Result  -> #sigil:result                                        *)

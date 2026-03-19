@@ -2,6 +2,7 @@ plugins {
     kotlin("jvm")
     kotlin("plugin.serialization")
     application
+    id("com.gradleup.shadow") version "8.3.6"
 }
 
 dependencies {
@@ -28,4 +29,13 @@ kotlin {
 
 application {
     mainClass.set("sigil.api.MainKt")
+}
+
+tasks.shadowJar {
+    archiveBaseName.set("sigil")
+    archiveClassifier.set("")
+    archiveVersion.set("")
+    manifest {
+        attributes("Main-Class" to "sigil.api.MainKt")
+    }
 }

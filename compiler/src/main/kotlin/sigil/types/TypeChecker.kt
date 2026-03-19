@@ -43,6 +43,17 @@ class TypeChecker {
             listOf(Type.Concrete(PrimitiveTypes.STRING), Type.Concrete(PrimitiveTypes.STRING)),
             Type.Concrete(PrimitiveTypes.STRING)
         )
+
+        // Stdlib math functions
+        val stringT = Type.Concrete(PrimitiveTypes.STRING)
+        env["#sigil:abs"] = Type.Function(listOf(intT), intT)
+        env["#sigil:min"] = Type.Function(listOf(intT, intT), intT)
+        env["#sigil:max"] = Type.Function(listOf(intT, intT), intT)
+
+        // Stdlib string functions
+        env["#sigil:str_length"] = Type.Function(listOf(stringT), intT)
+        env["#sigil:str_upper"] = Type.Function(listOf(stringT), stringT)
+        env["#sigil:str_lower"] = Type.Function(listOf(stringT), stringT)
     }
 
     fun registerTypeDef(td: TypeDef) {
